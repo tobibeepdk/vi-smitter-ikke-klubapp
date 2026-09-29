@@ -71,8 +71,17 @@
     return `<div class="vsi-auth-screen">
       <section class="vsi-auth-card" aria-labelledby="vsi-auth-title">
         <header class="vsi-auth-brand">
-          ${logoUrl() ? `<img class="vsi-auth-logo" src="${escapeHtml(logoUrl())}" alt="V.S.I logo" />` : ""}
-          <div><p>Vi smitter ikke</p><h1 id="vsi-auth-title">Klubapp</h1></div>
+          <div class="vsi-auth-brand-heading">
+            ${logoUrl() ? `<img class="vsi-auth-logo" src="${escapeHtml(logoUrl())}" alt="V.S.I logo" />` : ""}
+            <div><p>Klubportal · V.S.I</p><h1 id="vsi-auth-title">Vi smitter ikke</h1></div>
+          </div>
+          <div class="vsi-auth-welcome">
+            <span class="vsi-auth-kicker">Plads til alle. Sammen om mere.</span>
+            <h2>Mere end et hold.<br />Et fællesskab.</h2>
+            <p>Træning, klubliv og gode oplevelser. Her har vi klubben samlet ét sted.</p>
+            <div class="vsi-auth-topics" aria-label="Klubbens aktiviteter"><span>Hal-hockey</span><span>Floorball</span><span>Fællesskab</span></div>
+          </div>
+          <div class="vsi-auth-brand-foot"><span aria-hidden="true"></span>Din klub. Dit fællesskab.</div>
         </header>
         <div class="vsi-auth-body">${body}</div>
       </section>
@@ -149,6 +158,7 @@
   function renderLogin(defaultMode = inviteFromUrl() ? "signup" : "login") {
     const invite = Boolean(inviteFromUrl());
     setAuthScreen(`
+      <div class="vsi-auth-form-heading"><p>Velkommen til V.S.I</p><h2>${invite ? "Din plads i klubben" : "Godt at se dig igen"}</h2></div>
       <p class="vsi-auth-intro">Log ind for at se klubbens fælles data på computer, tablet eller telefon.</p>
       ${invite ? `<div class="vsi-auth-tabs" role="tablist" aria-label="Konto">
         <button class="vsi-auth-tab" type="button" role="tab" data-auth-tab="login" aria-selected="${defaultMode === "login"}">Log ind</button>

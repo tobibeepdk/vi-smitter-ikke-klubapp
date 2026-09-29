@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#68458d" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'" />
     <meta
       name="description"
       content="Klubapp til Vi smitter ikke – medlemmer, træning, fremmøde, point, beskeder og aktiviteter samlet ét sted."
@@ -3261,8 +3263,10 @@ svg:not(.svg-sprite) {
 }
 
     </style>
+    <link rel="stylesheet" href="auth.css" />
   </head>
-  <body>
+  <body class="auth-pending">
+    <div id="vsi-auth-root" aria-live="polite"></div>
     <a class="skip-link" href="#main-content">Gå til indhold</a>
 
     <div class="app-shell">
@@ -3345,7 +3349,7 @@ svg:not(.svg-sprite) {
 
         <div class="sidebar__footer">
           <span class="privacy-dot" aria-hidden="true"></span>
-          <span>Gemt på denne enhed</span>
+          <span>Sikkert personligt login</span>
         </div>
       </aside>
 
@@ -3501,7 +3505,13 @@ svg:not(.svg-sprite) {
     </svg>
 
     <noscript>Denne app kræver JavaScript for at kunne gemme og vise klubdata.</noscript>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="config.js"></script>
+    <script src="auth.js"></script>
+    <script src="repository.js"></script>
     <script type="module">
+const authContext = await window.VSIAuth.ready;
+const repository = window.VSIRepository.create({ client: authContext.client, context: authContext });
 const {CATEGORY_LABELS,RECOVERY_KEY,STATUS_CONFIG,STORAGE_KEY,WEEKDAYS,attendanceForDate,createSeedData,generateId,latestMessage,leaderboardRows,loadDataWithStatus,localDateKey,memberStats,nextTraining,saveData,upcomingActivities,validateImport} = (() => {
 /**
  * Local data model for the V.S.I. club app.
@@ -3850,6 +3860,9 @@ function createSeedData(now = new Date()) {
 
 /** Generate collision-resistant, readable IDs without requiring a dependency. */
 function generateId(prefix = "item") {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
   const safePrefix =
     String(prefix)
       .trim()
@@ -3858,9 +3871,6 @@ function generateId(prefix = "item") {
       .replace(/^-+|-+$/g, "") || "item";
 
   const cryptoApi = globalThis.crypto;
-  if (typeof cryptoApi?.randomUUID === "function") {
-    return `${safePrefix}-${cryptoApi.randomUUID()}`;
-  }
   if (typeof cryptoApi?.getRandomValues === "function") {
     const words = new Uint32Array(4);
     cryptoApi.getRandomValues(words);
@@ -4344,8 +4354,10 @@ const ui = {
   timerInterval: null,
 };
 
-const initialLoad = loadDataWithStatus();
+const initialLoad = await repository.loadSnapshot();
 let data = initialLoad.data;
+let remoteMeta = initialLoad.meta;
+const isAdmin = repository.isAdmin;
 
 const main = document.querySelector("#main-content");
 const topbarTitle = document.querySelector("#topbar-title");
@@ -4483,6 +4495,7 @@ function emptyState({ iconName, title, body, action = "", compact = false }) {
 }
 
 function actionButtons(entity, id, { edit = true, remove = true } = {}) {
+  if (!isAdmin) return "";
   return `<div class="table-actions__inner">
     ${edit ? `<button class="action-button" type="button" data-action="edit-${entity}" data-id="${escapeHtml(id)}" aria-label="Redigér">${icon("edit")}</button>` : ""}
     ${remove ? `<button class="action-button action-button--danger" type="button" data-action="delete-${entity}" data-id="${escapeHtml(id)}" aria-label="Slet">${icon("trash")}</button>` : ""}
@@ -4491,6 +4504,7 @@ function actionButtons(entity, id, { edit = true, remove = true } = {}) {
 
 function currentRouteFromHash() {
   const route = window.location.hash.replace(/^#/, "");
+  if (route === "data" && !isAdmin) return "dashboard";
   return Object.hasOwn(ROUTES, route) ? route : "dashboard";
 }
 
@@ -4530,11 +4544,19 @@ function render() {
   if (ui.route === "exercises") updateTimerDisplay();
 }
 
-function commit(mutator, toast = {}) {
+async function commit(mutator, toast = {}) {
+  if (!isAdmin) {
+    showToast("Kun for administratorer", "Din konto har læseadgang til klubbens fælles oplysninger.", "error");
+    return false;
+  }
   try {
+    const previous = cloneData();
     const draft = cloneData();
     mutator(draft);
-    data = saveData(draft);
+    validateImport(draft);
+    const saved = await repository.saveSnapshot(previous, draft);
+    data = saved.data;
+    remoteMeta = saved.meta;
     render();
     if (toast.title) showToast(toast.title, toast.message);
     return true;
@@ -4609,13 +4631,13 @@ function serviceWorkerRegistration() {
 
 function renderDashboard() {
   const todayKey = localDateKey();
-  const todaysAttendance = attendanceForDate(data, todayKey);
-  const presentToday = todaysAttendance.filter((record) => record.status === "present").length;
-  const totalPoints = data.points.reduce((sum, point) => sum + point.amount, 0);
+  const todayTotals = repository.todayAttendance(todayKey);
+  const presentToday = todayTotals.present;
+  const totalPoints = remoteMeta?.totalClubPoints ?? data.points.reduce((sum, point) => sum + point.amount, 0);
   const next = nextTraining(data);
   const message = latestMessage(data);
   const activities = upcomingActivities(data).slice(0, 3);
-  const leaders = leaderboardRows(data, "combined").slice(0, 3);
+  const leaders = repository.leaderboard("combined").slice(0, 3);
 
   const nextTrainingCard = next
     ? `
@@ -4663,8 +4685,8 @@ function renderDashboard() {
         <div class="stats-grid" aria-label="Klubbens nøgletal">
           ${renderStatCard("users", "Medlemmer", data.members.length, data.members.length === 1 ? "1 person i klubben" : `${data.members.length} personer i klubben`)}
           ${renderStatCard("clock", "Træningstider", data.trainings.length, data.trainings.length === 1 ? "1 fast tid hver uge" : `${data.trainings.length} faste tider hver uge`, "teal")}
-          ${renderStatCard("check-circle", "Dagens fremmøde", presentToday, `${todaysAttendance.length} registreret i dag`, "teal")}
-          ${renderStatCard("star", "Samlede point", totalPoints, `${data.points.length} pointtildelinger`, "warning")}
+          ${renderStatCard("check-circle", "Dagens fremmøde", presentToday, `${todayTotals.total} registreret i dag`, "teal")}
+          ${renderStatCard("star", "Samlede point", totalPoints, isAdmin ? `${data.points.length} pointtildelinger` : "På klubbens rangliste", "warning")}
         </div>
 
         <article class="card dashboard-main-card">
@@ -4745,7 +4767,10 @@ function renderCompactLeader(row) {
 }
 
 function renderMembers() {
-  const statsMap = new Map(memberStats(data).map((stats) => [stats.memberId, stats]));
+  const memberStatistics = isAdmin
+    ? memberStats(data)
+    : repository.leaderboard("combined").map((row) => ({ memberId: row.memberId, present: row.present, attendanceTotal: row.present, points: row.points }));
+  const statsMap = new Map(memberStatistics.map((stats) => [stats.memberId, stats]));
   const query = normalized(ui.memberSearch);
   const members = [...data.members]
     .filter((member) => !query || [member.name, member.role, member.team, member.email, member.phone].some((value) => normalized(value).includes(query)))
@@ -4754,12 +4779,12 @@ function renderMembers() {
 
   return `
     <section class="page">
-      ${pageHeader({ eyebrow: "Holdet", title: "Medlemmer & spillere", description: "Saml roller, hold og kontaktoplysninger – og find alle igen på et øjeblik.", action: addButton })}
+      ${pageHeader({ eyebrow: "Holdet", title: "Medlemmer & spillere", description: isAdmin ? "Saml roller, hold og kontaktoplysninger – og find alle igen på et øjeblik." : "Se klubbens medlemmer, roller og hold. Andres kontaktoplysninger er private.", action: isAdmin ? addButton : "" })}
 
       <div class="toolbar">
         <div class="search-field">
           ${icon("search")}
-          <input id="member-search" type="search" value="${escapeHtml(ui.memberSearch)}" placeholder="Søg på navn, rolle, hold eller kontakt…" aria-label="Søg efter medlemmer" />
+          <input id="member-search" type="search" value="${escapeHtml(ui.memberSearch)}" placeholder="${isAdmin ? "Søg på navn, rolle, hold eller kontakt…" : "Søg på navn, rolle eller hold…"}" aria-label="Søg efter medlemmer" />
           <button class="search-field__clear${ui.memberSearch ? " is-visible" : ""}" type="button" data-action="clear-member-search" aria-label="Ryd søgning">${icon("x")}</button>
         </div>
         <div class="toolbar__right"><span class="badge badge--muted">${members.length} ${members.length === 1 ? "medlem" : "medlemmer"}</span></div>
@@ -4782,10 +4807,10 @@ function renderMembers() {
 function renderMemberRow(member, stats) {
   const roleTeam = [member.role, member.team].filter(Boolean);
   return `<tr>
-    <td><div class="person-cell"><span class="avatar">${escapeHtml(initials(member.name))}</span><span><span class="person-cell__name">${escapeHtml(member.name)}</span><span class="person-cell__sub">Oprettet ${escapeHtml(formatDate(member.createdAt || new Date(), { day: "numeric", month: "short", year: "numeric" }))}</span></span></div></td>
+    <td><div class="person-cell"><span class="avatar">${escapeHtml(initials(member.name))}</span><span><span class="person-cell__name">${escapeHtml(member.name)}</span><span class="person-cell__sub">${member.createdAt ? `Oprettet ${escapeHtml(formatDate(member.createdAt, { day: "numeric", month: "short", year: "numeric" }))}` : "Klubmedlem"}</span></span></div></td>
     <td>${roleTeam.length ? roleTeam.map((value, index) => `<span class="${index ? "person-cell__sub" : ""}">${escapeHtml(value)}</span>`).join("") : "<span class=\"person-cell__sub\">Ikke angivet</span>"}</td>
     <td><div class="contact-stack">${member.email ? `<a class="contact-link" href="mailto:${encodeURIComponent(member.email)}">${icon("mail")} ${escapeHtml(member.email)}</a>` : ""}${member.phone ? `<a class="contact-link" href="tel:${escapeHtml(member.phone.replace(/[^+\d]/g, ""))}">${icon("phone")} ${escapeHtml(member.phone)}</a>` : ""}${!member.email && !member.phone ? "<span class=\"person-cell__sub\">Ingen kontaktinfo</span>" : ""}</div></td>
-    <td><span class="metric-value">${stats?.present ?? 0}</span><span class="metric-sub">mødt af ${stats?.attendanceTotal ?? 0}</span></td>
+    <td><span class="metric-value">${stats?.present ?? 0}</span><span class="metric-sub">${isAdmin ? `mødt af ${stats?.attendanceTotal ?? 0}` : "fremmøder"}</span></td>
     <td><span class="metric-value">${stats?.points ?? 0}</span><span class="metric-sub">samlet</span></td>
     <td class="table-actions">${actionButtons("member", member.id)}</td>
   </tr>`;
@@ -4803,7 +4828,7 @@ function renderMemberCard(member, stats) {
       ${member.phone ? `<a class="contact-link" href="tel:${escapeHtml(member.phone.replace(/[^+\d]/g, ""))}">${icon("phone")} ${escapeHtml(member.phone)}</a>` : ""}
       <span class="metadata-line">${icon("check-circle")} ${stats?.present ?? 0} fremmøder</span>
     </div>
-    <footer class="record-card__footer"><span class="record-meta">Medlem siden ${escapeHtml(formatDate(member.createdAt || new Date(), { month: "short", year: "numeric" }))}</span><div class="record-card__actions">${actionButtons("member", member.id)}</div></footer>
+    <footer class="record-card__footer"><span class="record-meta">${member.createdAt ? `Medlem siden ${escapeHtml(formatDate(member.createdAt, { month: "short", year: "numeric" }))}` : "Klubmedlem"}</span><div class="record-card__actions">${actionButtons("member", member.id)}</div></footer>
   </article>`;
 }
 
@@ -4844,7 +4869,7 @@ function renderAttendance() {
 
   return `
     <section class="page">
-      ${pageHeader({ eyebrow: "Deltagelse", title: "Fremmøde", description: "Registrér mødt, afbud eller udeblevet og behold et enkelt overblik over historikken.", action: registerButton })}
+      ${pageHeader({ eyebrow: "Deltagelse", title: "Fremmøde", description: isAdmin ? "Registrér mødt, afbud eller udeblevet og behold et enkelt overblik over historikken." : "Se din egen fremmødehistorik og status fra klubbens registreringer.", action: isAdmin ? registerButton : "" })}
 
       <div class="summary-strip" aria-label="Fremmødestatus for den viste historik">
         ${renderAttendanceSummary("present", counts.present, "Mødt")}
@@ -4901,14 +4926,14 @@ function renderAttendanceCard(record) {
 }
 
 function renderPoints() {
-  const stats = memberStats(data).sort((a, b) => b.points - a.points || a.name.localeCompare(b.name, "da-DK"));
+  const stats = (isAdmin ? memberStats(data) : repository.leaderboard("points").map((row) => ({ ...row, latestPointReason: "" }))).sort((a, b) => b.points - a.points || a.name.localeCompare(b.name, "da-DK"));
   const entries = [...data.points].sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const total = entries.reduce((sum, entry) => sum + entry.amount, 0);
   const addButton = `<button class="button button--primary" type="button" data-action="open-point"${data.members.length ? "" : " disabled"}>${icon("plus")} Tildel point</button>`;
 
   return `
     <section class="page">
-      ${pageHeader({ eyebrow: "Anerkendelse", title: "Point", description: "Beløn træning, kampindsats og hjælp i klubben. Totaler og seneste årsag beregnes automatisk.", action: addButton })}
+      ${pageHeader({ eyebrow: "Anerkendelse", title: "Point", description: isAdmin ? "Beløn træning, kampindsats og hjælp i klubben. Totaler og seneste årsag beregnes automatisk." : "Se dine egne pointtildelinger og klubbens samlede pointoversigt.", action: isAdmin ? addButton : "" })}
       ${data.members.length === 0 ? `<div class="card">${emptyState({ iconName: "users", title: "Point kræver medlemmer", body: "Opret klubbens første medlem, før du tildeler point.", action: `<a class="button button--primary" href="#members" data-route="members">${icon("plus")} Opret medlem</a>` })}</div>` : `
         <div class="points-layout">
           <article class="card table-card">
@@ -4958,7 +4983,7 @@ function renderPointsMember(stats) {
 }
 
 function renderLeaderboard() {
-  const rows = leaderboardRows(data, ui.leaderboardMode);
+  const rows = repository.leaderboard(ui.leaderboardMode);
   const labels = {
     points: { score: "Point", explanation: "Ranglisten sorteres efter det samlede antal tildelte point." },
     attendance: { score: "Fremmøder", explanation: "Ranglisten sorteres efter antal registreringer med status Mødt." },
@@ -5172,7 +5197,7 @@ function renderData() {
   const recovery = recoveryPayload();
   return `
     <section class="page">
-      ${pageHeader({ eyebrow: "Lokale klubdata", title: "Data & backup", description: "Alle oplysninger bliver på denne enhed, indtil du selv eksporterer og deler en backup." })}
+      ${pageHeader({ eyebrow: "Sikre klubdata", title: "Data & backup", description: "Klubbens oplysninger synkroniseres mellem de brugere, som har fået personlig adgang." })}
       <div class="data-layout">
         <article class="card backup-card">
           <div class="backup-card__icon">${icon("database")}</div>
@@ -5183,19 +5208,19 @@ function renderData() {
             <button class="button button--ghost" type="button" data-action="import-data">${icon("upload")} Importér backup</button>
           </div>
           <div class="data-facts">
-            <div class="data-fact">${icon("database")}<div><strong>${recordCount} poster · ${escapeHtml(size)}</strong><span>Aktuelt indhold i den lokale database</span></div></div>
+            <div class="data-fact">${icon("database")}<div><strong>${recordCount} poster · ${escapeHtml(size)}</strong><span>Aktuelt indhold, som din administratorkonto kan se</span></div></div>
             <div class="data-fact">${icon("clock")}<div><strong>${latestChange ? escapeHtml(formatDateTime(latestChange)) : "Ingen ændringer endnu"}</strong><span>Seneste registrerede ændring</span></div></div>
-            <div class="data-fact">${icon("lock")}<div><strong>Kun i denne browser</strong><span>Ingen automatisk synkronisering til andre enheder</span></div></div>
+            <div class="data-fact">${icon("lock")}<div><strong>Beskyttet med personligt login</strong><span>Adgangen kontrolleres af klubbens brugerroller</span></div></div>
           </div>
         </article>
         <aside class="card privacy-card">
           <div class="privacy-card__icon">${icon("lock")}</div>
-          <h2>Privat som udgangspunkt</h2>
-          <p>Appen bruger ingen ekstern database. Medlemsdata sendes ikke automatisk til andre computere eller tjenester.</p>
+          <h2>Fælles og adgangsbeskyttet</h2>
+          <p>Data ligger i klubbens Supabase-database. Kun inviterede konti kan hente data, og følsomme oplysninger er begrænset med adgangsregler.</p>
           <div class="data-facts">
-            <div class="data-fact">${icon("check")}<div><strong>Virker offline</strong><span>Når appen først er hentet eller startet lokalt</span></div></div>
-            <div class="data-fact">${icon("check")}<div><strong>Flyt med backup</strong><span>Eksportér her og importér filen på en anden enhed</span></div></div>
-            <div class="data-fact">${icon("alert")}<div><strong>Husk jævnlig backup</strong><span>Rydning af browserdata kan slette de lokale oplysninger</span></div></div>
+            <div class="data-fact">${icon("check")}<div><strong>Automatisk synkronisering</strong><span>Ændringer bliver tilgængelige på de andre godkendte enheder</span></div></div>
+            <div class="data-fact">${icon("check")}<div><strong>Ekstra sikkerhedskopi</strong><span>Eksportér alle synlige klubdata som JSON</span></div></div>
+            <div class="data-fact">${icon("alert")}<div><strong>Opbevar backup sikkert</strong><span>Filen kan indeholde person- og kontaktoplysninger</span></div></div>
           </div>
         </aside>
       </div>
@@ -5203,7 +5228,7 @@ function renderData() {
         <div class="danger-zone__inner"><div><h3>En tidligere datakopi kunne ikke læses</h3><p>Den rå kopi er bevaret, så den ikke går tabt. Hent den, før du fjerner den eller fortsætter en større oprydning.</p></div><div class="backup-actions"><button class="button button--ghost" type="button" data-action="export-recovery">${icon("download")} Hent rå kopi</button><button class="button button--ghost" type="button" data-action="clear-recovery">Fjern kopi</button></div></div>
       </article>` : ""}
       <article class="card danger-zone">
-        <div class="danger-zone__inner"><div><h3>Nulstil appen</h3><p>Slet alle lokale data og gendan de to eksempeltræninger samt velkomstbeskeden.</p></div><button class="button button--ghost" type="button" data-action="reset-data">Nulstil alle data</button></div>
+        <div class="danger-zone__inner"><div><h3>Nulstil klubbens data</h3><p>Slet klubbens fælles poster og gendan de to eksempeltræninger. Konti og adgange påvirkes ikke.</p></div><button class="button button--ghost" type="button" data-action="reset-data">Nulstil alle data</button></div>
       </article>
     </section>`;
 }
@@ -5247,7 +5272,7 @@ function openMemberForm(id = "") {
       <div class="form-field"><label for="member-email">E-mail <span class="optional">(valgfri)</span></label><input id="member-email" name="email" type="email" maxlength="160" autocomplete="email" placeholder="navn@eksempel.dk" value="${escapeHtml(member?.email || "")}" /></div>
       <div class="form-field"><label for="member-phone">Telefon <span class="optional">(valgfri)</span></label><input id="member-phone" name="phone" type="tel" maxlength="30" autocomplete="tel" placeholder="12 34 56 78" value="${escapeHtml(member?.phone || "")}" /></div>
     </div>
-    <div class="form-notice">${icon("lock")} <span>Kontaktoplysninger gemmes kun lokalt i denne browser.</span></div>`,
+    <div class="form-notice">${icon("lock")} <span>Kontaktoplysninger gemmes sikkert og kan kun ses af klubbens administratorer samt medlemmet selv.</span></div>`,
   });
 }
 
@@ -5350,7 +5375,7 @@ function formValue(formData, name) {
   return String(formData.get(name) ?? "").trim();
 }
 
-function handleFormSubmit(event) {
+async function handleFormSubmit(event) {
   event.preventDefault();
   if (!entityForm.reportValidity()) return;
   const formData = new FormData(entityForm);
@@ -5360,13 +5385,13 @@ function handleFormSubmit(event) {
   let result = false;
 
   if (kind === "member") {
-    result = commit((draft) => {
+    result = await commit((draft) => {
       const payload = { name: formValue(formData, "name"), role: formValue(formData, "role"), team: formValue(formData, "team"), email: formValue(formData, "email"), phone: formValue(formData, "phone"), updatedAt: now };
       if (id) Object.assign(draft.members.find((member) => member.id === id), payload);
       else draft.members.push({ id: generateId("member"), ...payload, createdAt: now });
     }, { title: id ? "Medlemmet er opdateret" : "Medlemmet er oprettet" });
   } else if (kind === "training") {
-    result = commit((draft) => {
+    result = await commit((draft) => {
       const payload = { title: formValue(formData, "title"), weekday: Number(formData.get("weekday")), time: formValue(formData, "time"), location: formValue(formData, "location"), updatedAt: now };
       if (id) Object.assign(draft.trainings.find((training) => training.id === id), payload);
       else draft.trainings.push({ id: generateId("training"), ...payload, createdAt: now });
@@ -5379,7 +5404,7 @@ function handleFormSubmit(event) {
     }
     const selectedMemberId = formValue(formData, "memberId");
     const wasUpdated = data.attendance.some((record) => record.memberId === selectedMemberId && record.date === date);
-    result = commit((draft) => {
+    result = await commit((draft) => {
       const memberId = selectedMemberId;
       const existing = draft.attendance.find((record) => record.memberId === memberId && record.date === date);
       if (existing) {
@@ -5395,15 +5420,15 @@ function handleFormSubmit(event) {
       showToast("Ugyldigt antal point", "Angiv et helt tal mellem 1 og 999.", "error");
       return;
     }
-    result = commit((draft) => {
+    result = await commit((draft) => {
       draft.points.push({ id: generateId("point"), memberId: formValue(formData, "memberId"), amount, category: formValue(formData, "category"), reason: formValue(formData, "reason"), createdAt: now });
     }, { title: `${amount} point er tildelt` });
   } else if (kind === "message") {
-    result = commit((draft) => {
+    result = await commit((draft) => {
       draft.messages.push({ id: generateId("message"), title: formValue(formData, "title"), body: formValue(formData, "body"), createdAt: now });
     }, { title: "Beskeden er udgivet" });
   } else if (kind === "activity") {
-    result = commit((draft) => {
+    result = await commit((draft) => {
       const payload = { title: formValue(formData, "title"), category: formValue(formData, "category"), date: formValue(formData, "date"), time: formValue(formData, "time"), location: formValue(formData, "location"), notes: formValue(formData, "notes"), updatedAt: now };
       if (id) Object.assign(draft.activities.find((activity) => activity.id === id), payload);
       else draft.activities.push({ id: generateId("activity"), ...payload, createdAt: now });
@@ -5419,9 +5444,10 @@ function deleteMember(id) {
   const attendanceCount = data.attendance.filter((record) => record.memberId === id).length;
   const pointCount = data.points.filter((entry) => entry.memberId === id).length;
   const related = attendanceCount + pointCount;
+  const accountNotice = member.userId ? " Den tilknyttede konto mister samtidig adgangen til klubben." : "";
   confirmAction({
     title: `Slet ${member.name}?`,
-    message: related ? `Medlemmet samt ${attendanceCount} fremmøderegistreringer og ${pointCount} pointtildelinger bliver slettet. Handlingen kan ikke fortrydes.` : "Medlemmet bliver slettet permanent. Handlingen kan ikke fortrydes.",
+    message: related ? `Medlemmet samt ${attendanceCount} fremmøderegistreringer og ${pointCount} pointtildelinger bliver slettet.${accountNotice} Handlingen kan ikke fortrydes.` : `Medlemmet bliver slettet permanent.${accountNotice} Handlingen kan ikke fortrydes.`,
     onConfirm: () => commit((draft) => {
       draft.members = draft.members.filter((item) => item.id !== id);
       draft.attendance = draft.attendance.filter((record) => record.memberId !== id);
@@ -5505,12 +5531,14 @@ async function importDataFile(file) {
       message: `Backupfilen indeholder ${imported.members.length} medlemmer, ${imported.attendance.length} fremmøderegistreringer og ${imported.points.length} pointtildelinger. De nuværende data bliver erstattet.`,
       button: "Importér",
       tone: "primary",
-      onConfirm: () => {
+      onConfirm: async () => {
         try {
-          data = saveData(imported);
+          const saved = await repository.replaceSnapshot(imported);
+          data = saved.data;
+          remoteMeta = saved.meta;
           discardRecovery();
           render();
-          showToast("Backup er importeret", "Alle visninger er opdateret.");
+          showToast("Backup er importeret", "De fælles klubdata og alle visninger er opdateret.");
         } catch (error) {
           showToast("Kunne ikke importere", error.message || "Prøv igen.", "error");
         }
@@ -5528,12 +5556,14 @@ function resetAllData() {
     title: "Nulstil hele appen?",
     message: "Alle medlemmer, træningstider, fremmøder, point, beskeder og aktiviteter bliver slettet. Tag eventuelt en backup først.",
     button: "Nulstil",
-    onConfirm: () => {
+    onConfirm: async () => {
       try {
-        data = saveData(createSeedData());
+        const saved = await repository.replaceSnapshot(createSeedData());
+        data = saved.data;
+        remoteMeta = saved.meta;
         discardRecovery();
         render();
-        showToast("Appen er nulstillet", "Eksempeltræningerne er gendannet.");
+        showToast("Klubdata er nulstillet", "Eksempeltræningerne er gendannet, og brugerkonti er bevaret.");
       } catch (error) {
         showToast("Kunne ikke nulstille", error.message || "Prøv igen.", "error");
       }
@@ -5585,6 +5615,21 @@ function handleAction(actionElement) {
   const action = actionElement.dataset.action;
   const id = actionElement.dataset.id || "";
   if (!action) return;
+
+  const adminActions = new Set([
+    "open-member", "edit-member", "delete-member",
+    "open-training", "edit-training", "delete-training",
+    "open-attendance", "delete-attendance",
+    "open-point", "delete-point",
+    "open-message", "delete-message",
+    "open-activity", "edit-activity", "delete-activity",
+    "export-data", "export-recovery", "clear-recovery",
+    "import-data", "reset-data",
+  ]);
+  if (!isAdmin && adminActions.has(action)) {
+    showToast("Kun for administratorer", "Din konto har læseadgang til klubbens fælles oplysninger.", "error");
+    return;
+  }
 
   if (action === "toggle-sidebar") toggleMenu();
   else if (action === "close-form-dialog") closeForm();
@@ -5676,14 +5721,26 @@ window.addEventListener("hashchange", () => {
   render();
   main.focus();
 });
-window.addEventListener("storage", (event) => {
-  if (event.key !== STORAGE_KEY) return;
-  const update = loadDataWithStatus();
+repository.subscribe((update) => {
   data = update.data;
+  remoteMeta = update.meta;
   if (formDialog.open) closeForm();
   render();
-  if (update.issue) showToast("Data kunne ikke læses", "En rå gendannelseskopi er bevaret under Data & backup.", "error");
-  else showToast("Data er opdateret", "En anden fane gemte nye klubdata.");
+  showToast("Data er opdateret", "En anden bruger gemte nye klubdata.");
+});
+
+let lastFocusRefresh = Date.now();
+window.addEventListener("focus", async () => {
+  if (Date.now() - lastFocusRefresh < 30_000) return;
+  lastFocusRefresh = Date.now();
+  try {
+    const update = await repository.refresh();
+    data = update.data;
+    remoteMeta = update.meta;
+    render();
+  } catch {
+    // The account control reports sync errors without replacing the current view.
+  }
 });
 
 window.addEventListener("resize", () => {
@@ -5693,9 +5750,6 @@ window.addEventListener("resize", () => {
 
 syncSidebarAccessibility();
 render();
-if (initialLoad.issue) {
-  showToast("Lokale data kunne ikke læses", "En rå gendannelseskopi er bevaret under Data & backup.", "error");
-}
 
     </script>
   </body>
